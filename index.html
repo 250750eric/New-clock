@@ -377,43 +377,94 @@ async function fetchWeather(){
   }catch(e){ console.error('Weather fetch error:', e); }
 }
 
-// ── API: 空氣品質 (修正版 - 依座標找最近測站) ──
+// ── API: 空氣品質 ──
+// 主要來源：WAQI (World Air Quality Index) - 與 GPS Clock 5.3 相同方案
+// 備援一：open-meteo air quality (PM2.5 換算 AQI)
+// 備援二：環境部 API
+
+function pm25ToAQI(pm) {
+  if(isNaN(pm) || pm < 0) return 0;
+  const bp = [
+    [0,     12,    0,   50 ],
+    [12.1,  35.4,  51,  100],
+    [35.5,  55.4,  101, 150],
+    [55.5,  150.4, 151, 200],
+    [150.5, 250.4, 201, 300],
+    [250.5, 350.4, 301, 400],
+    [350.5, 500.4, 401, 500],
+  ];
+  for(const [lo, hi, ilo, ihi] of bp){
+    if(pm <= hi) return Math.round(((ihi-ilo)/(hi-lo))*(pm-lo)+ilo);
+  }
+  return 500;
+}
+
+function applyAQI(aqi, pm25, label) {
+  const safeAQI = isNaN(aqi) ? 0 : aqi;
+  document.getElementById('val-aqi').textContent = isNaN(aqi) ? '--' : aqi;
+  document.getElementById('aqi-label').textContent = label;
+  document.getElementById('bar-aqi').style.width = Math.min(100, safeAQI / 3) + '%';
+  document.getElementById('panel-aqi').className = 'data-panel ' +
+    (safeAQI<=50 ? 'aqi-good' : safeAQI<=100 ? 'aqi-moderate' : safeAQI<=150 ? 'aqi-unhealthy' : 'aqi-hazardous');
+  aqiData = { aqi: safeAQI, pm25: isNaN(pm25)?0:pm25 };
+  updateTicker();
+}
+
 async function fetchAQI(){
-  try{
-    // 抓全台所有測站，不使用 query 篩選（舊版 query 語法已失效）
+  // ── 主要：WAQI (同 GPS Clock 5.3 用法) ──
+  try {
+    const r = await fetch(`https://api.waqi.info/feed/geo:${currentLat};${currentLon}/?token=demo`);
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    if(d.status !== 'ok') throw new Error('WAQI status: ' + d.status);
+    const aqi  = parseInt(d.data.aqi);
+    const pm25 = parseFloat(d.data.iaqi?.pm25?.v ?? NaN);
+    const site = d.data.city?.name || '';
+    const desc = aqi > 100 ? '空氣不佳' : aqi > 50 ? '空氣普通' : '空氣良好';
+    applyAQI(aqi, pm25, `PM2.5: ${isNaN(pm25)?'--':pm25} // ${desc} [${site}]`);
+    return; // 成功就直接結束
+  } catch(e) {
+    console.warn('WAQI failed, trying open-meteo...', e);
+  }
+
+  // ── 備援一：open-meteo air quality ──
+  try {
+    const r = await fetch(
+      `https://air-quality-api.open-meteo.com/v1/air-quality` +
+      `?latitude=${currentLat}&longitude=${currentLon}` +
+      `&current=pm2_5&timezone=Asia%2FTaipei`
+    );
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    const pm25 = parseFloat(d.current.pm2_5);
+    const aqi  = pm25ToAQI(pm25);
+    applyAQI(aqi, pm25, `PM2.5: ${isNaN(pm25)?'--':pm25.toFixed(1)} μg/m³`);
+    return;
+  } catch(e) {
+    console.warn('open-meteo AQI failed, trying moenv...', e);
+  }
+
+  // ── 備援二：環境部 API ──
+  try {
     const r = await fetch('https://data.moenv.gov.tw/api/v2/aqx_p_432?api_key=e8dd42e6-9b8b-43f8-991e-b3dee723a52d&limit=1000&format=JSON');
     const d = await r.json();
-
     if(!d.records || d.records.length === 0) throw new Error('no records');
-
-    // 計算每個測站與當前位置的距離，找最近的
     let nearest = null, minDist = Infinity;
     for(const rec of d.records){
-      const lat = parseFloat(rec.latitude);
-      const lon = parseFloat(rec.longitude);
-      if(isNaN(lat) || isNaN(lon)) continue;
+      const lat = parseFloat(rec.latitude), lon = parseFloat(rec.longitude);
+      if(isNaN(lat)||isNaN(lon)) continue;
       const dist = Math.hypot(lat - currentLat, lon - currentLon);
       if(dist < minDist){ minDist = dist; nearest = rec; }
     }
-
-    if(!nearest) throw new Error('no nearest station found');
-
-    const aqi    = parseInt(nearest.aqi);
-    const pm25   = parseFloat(nearest['pm2.5']);
-    const site   = nearest.sitename || nearest.siteName || '';
-
-    document.getElementById('val-aqi').textContent = isNaN(aqi) ? '--' : aqi;
-    document.getElementById('aqi-label').textContent = `PM2.5:${isNaN(pm25)?'--':pm25} [${site}]`;
-    document.getElementById('bar-aqi').style.width = Math.min(100, (isNaN(aqi)?0:aqi) / 3) + '%';
-    document.getElementById('panel-aqi').className = 'data-panel ' +
-      (aqi<=50 ? 'aqi-good' : aqi<=100 ? 'aqi-moderate' : aqi<=150 ? 'aqi-unhealthy' : 'aqi-hazardous');
-    aqiData = { aqi: isNaN(aqi)?0:aqi, pm25: isNaN(pm25)?0:pm25 };
-    updateTicker();
-
-  } catch(e){
-    console.error('AQI fetch error:', e);
+    if(!nearest) throw new Error('no station');
+    const aqi  = parseInt(nearest.aqi);
+    const pm25 = parseFloat(nearest['pm2.5']);
+    const site = nearest.sitename || nearest.siteName || '';
+    applyAQI(aqi, pm25, `PM2.5: ${isNaN(pm25)?'--':pm25} [${site}]`);
+  } catch(e) {
+    console.error('All AQI sources failed:', e);
     document.getElementById('val-aqi').textContent = '--';
-    document.getElementById('aqi-label').textContent = 'API 錯誤';
+    document.getElementById('aqi-label').textContent = '資料暫無法取得';
   }
 }
 
