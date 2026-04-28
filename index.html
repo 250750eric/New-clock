@@ -411,44 +411,14 @@ function applyAQI(aqi, pm25, label) {
 }
 
 async function fetchAQI(){
-  // ── 主要：WAQI (同 GPS Clock 5.3 用法) ──
+  // ── 主要：環境部 API 經由 corsproxy.io 繞過 CORS（台灣官方數據，最精確）──
   try {
-    const r = await fetch(`https://api.waqi.info/feed/geo:${currentLat};${currentLon}/?token=demo`);
+    const moenvUrl = 'https://data.moenv.gov.tw/api/v2/aqx_p_432?api_key=e8dd42e6-9b8b-43f8-991e-b3dee723a52d&limit=1000&format=JSON';
+    const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(moenvUrl)}`);
     if(!r.ok) throw new Error(`HTTP ${r.status}`);
-    const d = await r.json();
-    if(d.status !== 'ok') throw new Error('WAQI status: ' + d.status);
-    const aqi  = parseInt(d.data.aqi);
-    const pm25 = parseFloat(d.data.iaqi?.pm25?.v ?? NaN);
-    const site = d.data.city?.name || '';
-    const desc = aqi > 100 ? '空氣不佳' : aqi > 50 ? '空氣普通' : '空氣良好';
-    applyAQI(aqi, pm25, `PM2.5: ${isNaN(pm25)?'--':pm25} // ${desc} [${site}]`);
-    return; // 成功就直接結束
-  } catch(e) {
-    console.warn('WAQI failed, trying open-meteo...', e);
-  }
-
-  // ── 備援一：open-meteo air quality ──
-  try {
-    const r = await fetch(
-      `https://air-quality-api.open-meteo.com/v1/air-quality` +
-      `?latitude=${currentLat}&longitude=${currentLon}` +
-      `&current=pm2_5&timezone=Asia%2FTaipei`
-    );
-    if(!r.ok) throw new Error(`HTTP ${r.status}`);
-    const d = await r.json();
-    const pm25 = parseFloat(d.current.pm2_5);
-    const aqi  = pm25ToAQI(pm25);
-    applyAQI(aqi, pm25, `PM2.5: ${isNaN(pm25)?'--':pm25.toFixed(1)} μg/m³`);
-    return;
-  } catch(e) {
-    console.warn('open-meteo AQI failed, trying moenv...', e);
-  }
-
-  // ── 備援二：環境部 API ──
-  try {
-    const r = await fetch('https://data.moenv.gov.tw/api/v2/aqx_p_432?api_key=e8dd42e6-9b8b-43f8-991e-b3dee723a52d&limit=1000&format=JSON');
     const d = await r.json();
     if(!d.records || d.records.length === 0) throw new Error('no records');
+    // 找距離最近的台灣測站
     let nearest = null, minDist = Infinity;
     for(const rec of d.records){
       const lat = parseFloat(rec.latitude), lon = parseFloat(rec.longitude);
@@ -460,7 +430,43 @@ async function fetchAQI(){
     const aqi  = parseInt(nearest.aqi);
     const pm25 = parseFloat(nearest['pm2.5']);
     const site = nearest.sitename || nearest.siteName || '';
-    applyAQI(aqi, pm25, `PM2.5: ${isNaN(pm25)?'--':pm25} [${site}]`);
+    const county = nearest.county || '';
+    const desc = aqi > 100 ? '空氣不佳' : aqi > 50 ? '空氣普通' : '空氣良好';
+    applyAQI(aqi, pm25, `PM2.5: ${isNaN(pm25)?'--':pm25} // ${desc} [${county}${site}]`);
+    return;
+  } catch(e) {
+    console.warn('moenv via corsproxy failed, trying open-meteo...', e);
+  }
+
+  // ── 備援一：open-meteo air quality（無 CORS、無 API key）──
+  try {
+    const r = await fetch(
+      `https://air-quality-api.open-meteo.com/v1/air-quality` +
+      `?latitude=${currentLat}&longitude=${currentLon}` +
+      `&current=pm2_5&timezone=Asia%2FTaipei`
+    );
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    const pm25 = parseFloat(d.current.pm2_5);
+    const aqi  = pm25ToAQI(pm25);
+    const desc = aqi > 100 ? '空氣不佳' : aqi > 50 ? '空氣普通' : '空氣良好';
+    applyAQI(aqi, pm25, `PM2.5: ${isNaN(pm25)?'--':pm25.toFixed(1)} μg/m³ // ${desc}`);
+    return;
+  } catch(e) {
+    console.warn('open-meteo AQI failed, trying WAQI...', e);
+  }
+
+  // ── 備援二：WAQI demo token（最後手段，可能回傳非台灣測站）──
+  try {
+    const r = await fetch(`https://api.waqi.info/feed/geo:${currentLat};${currentLon}/?token=demo`);
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    if(d.status !== 'ok') throw new Error('WAQI status: ' + d.status);
+    const aqi  = parseInt(d.data.aqi);
+    const pm25 = parseFloat(d.data.iaqi?.pm25?.v ?? NaN);
+    const site = d.data.city?.name || '';
+    const desc = aqi > 100 ? '空氣不佳' : aqi > 50 ? '空氣普通' : '空氣良好';
+    applyAQI(aqi, pm25, `PM2.5: ${isNaN(pm25)?'--':pm25} // ${desc} [${site}]`);
   } catch(e) {
     console.error('All AQI sources failed:', e);
     document.getElementById('val-aqi').textContent = '--';
